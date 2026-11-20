@@ -1,0 +1,9 @@
+{
+  "recommendations": [
+    "charliermarsh.ruff",
+    "ms-python.python",
+    "hashicorp.terraform",
+    "vitest.explorer",
+    "editorconfig.editorconfig"
+  ]
+}

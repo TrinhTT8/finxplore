@@ -1,0 +1,66 @@
+# ---------- Secrets & local config ----------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+backend.hcl
+*.tfvars
+!*.tfvars.example
+
+# ---------- Private docs ----------
+docs/ARCHITECTURE.md
+
+# ---------- OS / editors ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.swp
+
+# ---------- Node / frontend ----------
+node_modules/
+frontend/dist/
+frontend/coverage/
+*.tsbuildinfo
+npm-debug.log*
+.vite/
+
+# ---------- Python / backend ----------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+backend/build/
+backend/dist/
+*.zip
+
+# ---------- Terraform ----------
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraform.tfstate.lock.info
+tfplan
+*.tfplan
+
+# ---------- Data (never commit downloaded SEC data) ----------
+data/raw/
+data/curated/
+data/tmp/
+*.parquet
+companyfacts.zip

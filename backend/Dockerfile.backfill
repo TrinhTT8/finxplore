@@ -1,0 +1,9 @@
+# One-time backfill container (pushed to ECR, run as an ECS Fargate task).
+FROM public.ecr.aws/docker/library/python:3.13-slim
+
+WORKDIR /app
+COPY pyproject.toml ./
+COPY src ./src
+RUN pip install --no-cache-dir ".[pipeline]" boto3
+
+ENTRYPOINT ["python", "-m", "finxplore.backfill.main"]
