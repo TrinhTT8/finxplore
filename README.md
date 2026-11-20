@@ -29,8 +29,86 @@ Browser ─▶ CloudFront ─▶ S3 (React app)
 EventBridge (nightly) ─▶ Step Functions ─▶ SQS ─▶ worker Lambda ─▶ SEC EDGAR ─▶ S3 raw/ + curated/
 ```
 
-The S3 data lake is the single source of truth. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-for the full design, requirements, cost estimate and roadmap.
+The S3 data lake is the single source of truth. The nightly pipeline writes to it, and the
+website and AI analyst read from it through Athena. There is no database server to run.
+
+## Design overview
+
+### Data pipeline
+
+1. **EventBridge Scheduler** starts a **Step Functions** workflow every night.
+2. A plan step reads the S&P 500 company list and sends one **SQS** message per company (~500).
+3. A **worker Lambda** fetches each company's XBRL `companyfacts` from SEC EDGAR. It runs at most
+   5 at a time to respect SEC rate limits.
+4. The worker saves the raw JSON to `raw/`, which expires after 30 days. It then writes normalized
+   Parquet to `curated/facts/`, partitioned by fiscal year.
+5. A final step records the run in DynamoDB and publishes CloudWatch metrics. Failures are retried,
+   then sent to a dead-letter queue, and trigger an email alert.
+
+The historical backfill runs once as an **ECS Fargate** task. It reads the SEC's bulk
+`companyfacts.zip` instead of calling the API 500 times.
+
+```
+s3://edgar-lake-<account>/
+  raw/companyfacts/dt=YYYY-MM-DD/cik=##########.json
+  curated/facts/fiscal_year=YYYY/part-*.parquet
+  curated/companies/companies.parquet
+  config/sp500_ciks.csv
+```
+
+| Table | Key columns |
+| --- | --- |
+| `facts` | cik, ticker, metric, value, unit, fiscal_year, fiscal_period, period_end, form, filed_date, accession_no |
+| `companies` | cik, ticker, name, sector, exchange |
+| `sector_benchmarks` | Each metric's median per sector, recomputed nightly |
+
+### Data quality
+
+- **Tag mapping:** companies report the same concept under different XBRL tags, such as
+  `Revenues` and `RevenueFromContractWithCustomerExcludingAssessedTax`. Each metric lists its tags
+  in fallback order.
+- **Deduplication:** every 10-K re-reports prior years. For each period, the latest-filed value
+  wins, so restatements are picked up.
+- **Fiscal labels:** in `companyfacts`, a value's fiscal year and period describe the filing it came
+  from, not the period the number covers. Labels are taken from the earliest filing that reported
+  each period.
+- **Derived Q4:** companies don't file a Q4 10-Q. For flow metrics, Q4 is the full year minus
+  Q1, Q2 and Q3.
+- **Sector medians:** medians are used instead of averages, so one giant company doesn't skew the
+  comparison.
+
+### AI guardrails
+
+The AI analyst writes SQL but never runs it unchecked:
+
+1. The model answers at temperature 0, gets the schema plus a metric glossary, and returns SQL
+   as JSON.
+2. `sqlglot` parses the SQL and allows only one `SELECT` on approved tables and columns, with a
+   `LIMIT` of 100 or less. Anything else is rejected.
+3. The query runs in a read-only Athena workgroup with a per-query scan limit.
+4. A second short model call explains the result in plain English. The UI shows the table, the
+   explanation, the SQL and the "data as of" date.
+
+Other safeguards: a daily quota per user, a global daily cap, and an AI kill switch stored in SSM.
+Every number an answer gives must come from the data. The AI explains data and never recommends
+buying or selling. A text-to-SQL eval set runs in CI whenever the prompts change.
+
+### Security
+
+- Cognito handles sign-in. API Gateway checks the JWT on the AI routes, and public routes are
+  throttled.
+- Each Lambda has its own IAM role, and the CI deploy role is limited to the `main` branch through
+  OIDC, so no AWS keys are stored.
+- S3 Block Public Access is on for every bucket, and CloudFront is the only reader of the site
+  bucket.
+- The app stores only an email address per user. There are no secrets: the SEC needs no API key.
+
+### Cost
+
+FinXplore is designed for **under $5/month**. Nearly everything fits in AWS's always-free
+allowances. The remaining cost is mostly Bedrock tokens and Athena scans, which Parquet and
+partitioning keep small. There are no NAT Gateways, Glue crawlers or always-on servers. AWS Budgets
+emails an alert when spending passes $1, $5 and $10.
 
 | Layer | Stack |
 | --- | --- |
@@ -59,7 +137,6 @@ for the full design, requirements, cost estimate and roadmap.
 ├── frontend/                React + Vite app
 ├── infra/terraform/         bootstrap, envs/dev, modules
 ├── data/config/             S&P 500 CIK list (uploaded to s3://…/config/)
-├── docs/ARCHITECTURE.md     design doc
 └── .github/workflows/       CI
 ```
 

@@ -7,4 +7,5 @@
 ```
 
 CI runs the eval whenever files in `src/finxplore/ai/` change, and tracks accuracy over time
-(target: 90%+). Used to pick the Bedrock model (see the open questions in `docs/ARCHITECTURE.md`).
+(target: 90%+). The eval results decide which Bedrock model to use: pick the cheapest model
+that meets the accuracy target.
