@@ -44,8 +44,13 @@ module "data_lake" {
   raw_retention_days = 30
 }
 
+module "athena" {
+  source        = "../../modules/athena"
+  bucket_name   = module.data_lake.bucket_name
+  glue_database = module.data_lake.glue_database
+}
+
 # ---------- Later phases (see infra/terraform/README.md) ----------
-# module "athena"       -> app + ai-readonly workgroups, Glue tables with partition projection
 # module "pipeline"     -> EventBridge Scheduler, Step Functions, SQS + DLQ, worker Lambdas
 # module "app_tables"   -> DynamoDB Users, QueryCache, Watchlists, PipelineRuns
 # module "api"          -> API Gateway HTTP API, API Lambda, JWT authorizer
