@@ -1,0 +1,5 @@
+cik,metric,tags,note
+0002012383,revenue,RevenueFromContractWithCustomerExcludingAssessedTax,BlackRock: Revenues tag is a subset (~60% of total); contract revenue is the reported total
+0001002047,revenue,RevenueFromContractWithCustomerExcludingAssessedTax|SalesRevenueNet,NetApp: Revenues tag is a subset; contract revenue from FY2017; SalesRevenueNet before
+0001413329,revenue,RevenueFromContractWithCustomerExcludingAssessedTax,Philip Morris: SalesRevenueNet and the tax-inclusive tag include excise taxes (~2.5x net revenue); pre-2016 left empty rather than wrong
+0000906345,revenue,OperatingLeaseLeaseIncome|RealEstateRevenueNet,Camden: rent is lease income from 2018 (contract tag shrank to ~$7M after ASC 842); RealEstateRevenueNet before

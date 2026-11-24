@@ -21,6 +21,7 @@ import shutil
 import zipfile
 from pathlib import Path
 
+from finxplore.metrics import METRICS_BY_KEY
 from finxplore.pipeline.extract import extract_facts, merge_companyfacts
 from finxplore.sec.client import BULK_COMPANYFACTS_URL, pad_cik
 
@@ -40,6 +41,27 @@ def load_predecessors(path: Path | None) -> dict[str, list[str]]:
     with path.open(newline="", encoding="utf-8") as f:
         for r in csv.DictReader(f):
             result.setdefault(pad_cik(r["cik"]), []).append(pad_cik(r["predecessor_cik"]))
+    return result
+
+
+def load_overrides(path: Path | None) -> dict[str, dict[str, tuple[str, ...]]]:
+    """Map CIK -> {metric: tags} from metric_overrides.csv. A missing file means no overrides.
+
+    `tags` is a `|`-separated priority list that replaces the metric's default tags for that
+    company. An unknown metric name is an error, so a typo can't silently do nothing.
+    """
+    if path is None or not path.is_file():
+        return {}
+    result: dict[str, dict[str, tuple[str, ...]]] = {}
+    with path.open(newline="", encoding="utf-8") as f:
+        for r in csv.DictReader(f):
+            metric = r["metric"].strip()
+            if metric not in METRICS_BY_KEY:
+                raise ValueError(f"unknown metric {metric!r} in {path}")
+            tags = tuple(t.strip() for t in r["tags"].split("|") if t.strip())
+            if not tags:
+                raise ValueError(f"no tags for {r['cik']}/{metric} in {path}")
+            result.setdefault(pad_cik(r["cik"]), {})[metric] = tags
     return result
 
 
@@ -103,14 +125,21 @@ def write_companies(ciks_path: Path, out_dir: Path) -> Path:
 
 
 def run_backfill(
-    ciks_path: Path, zip_path: Path, out_dir: Path, predecessors_path: Path | None = None
+    ciks_path: Path,
+    zip_path: Path,
+    out_dir: Path,
+    predecessors_path: Path | None = None,
+    overrides_path: Path | None = None,
 ) -> int:
     """Extract facts for every company and write curated Parquet. Returns the row count."""
     all_rows: list[dict] = []
     companies = 0
     predecessors = load_predecessors(predecessors_path)
+    overrides = load_overrides(overrides_path)
     for ticker, data in iter_companyfacts(zip_path, load_ciks(ciks_path), predecessors):
-        all_rows.extend(extract_facts(data, ticker=ticker))
+        # data["cik"] is the current CIK even after merging predecessors
+        company_overrides = overrides.get(pad_cik(data["cik"]))
+        all_rows.extend(extract_facts(data, ticker=ticker, overrides=company_overrides))
         companies += 1
 
     fact_files = write_facts(all_rows, out_dir)
@@ -145,8 +174,14 @@ def main() -> None:
         default=Path("../data/config/cik_predecessors.csv"),
         help="CSV of cik,predecessor_cik pairs whose history is merged in (optional)",
     )
+    parser.add_argument(
+        "--overrides",
+        type=Path,
+        default=Path("../data/config/metric_overrides.csv"),
+        help="CSV of per-company tag overrides: cik,metric,tags(|-separated),note (optional)",
+    )
     args = parser.parse_args()
-    run_backfill(args.ciks, args.zip, args.out_dir, args.predecessors)
+    run_backfill(args.ciks, args.zip, args.out_dir, args.predecessors, args.overrides)
 
 
 if __name__ == "__main__":

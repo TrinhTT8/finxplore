@@ -260,3 +260,35 @@ def test_pre_2018_sales_revenue_net_also_guards_against_partial_revenues():
     [row] = _revenue(doc)
     assert row["value"] == 5.206e9
     assert row["fiscal_year"] == 2010
+
+
+def test_override_replaces_tag_list_and_disables_component_floor():
+    # BlackRock-style: `Revenues` is a subset (~60% of contract revenue), so the 50% floor
+    # cannot catch it. An override names the right tag for this company.
+    doc = _doc(
+        2012383,
+        Revenues=[_revenue_fact(*FY2019, 12.8e9, "2019-06-28", 2019, "FY")],
+        **{CONTRACT: [_revenue_fact(*FY2019, 20.4e9, "2019-06-28", 2019, "FY")]},
+    )
+    assert [r["value"] for r in _revenue(doc)] == [12.8e9]  # default rules
+
+    rows = extract_facts(doc, ticker="BLK", overrides={"revenue": (CONTRACT,)})
+    assert [r["value"] for r in rows if r["metric"] == "revenue"] == [20.4e9]
+
+
+def test_override_only_listed_tags_are_used():
+    # Philip Morris-style: only the net tag is allowed; a year without it is left out
+    # rather than filled with a tax-inclusive (wrong) value.
+    doc = _doc(
+        1413329,
+        SalesRevenueNet=[_revenue_fact(*FY2019, 80.1e9, "2019-06-28", 2019, "FY")],
+    )
+    rows = extract_facts(doc, ticker="PM", overrides={"revenue": (CONTRACT,)})
+    assert [r for r in rows if r["metric"] == "revenue"] == []
+
+
+def test_override_for_one_metric_leaves_others_alone():
+    doc = _load()
+    default = [r for r in extract_facts(doc, ticker="AAPL") if r["metric"] != "revenue"]
+    overridden = extract_facts(doc, ticker="AAPL", overrides={"revenue": ("SalesRevenueNet",)})
+    assert [r for r in overridden if r["metric"] != "revenue"] == default

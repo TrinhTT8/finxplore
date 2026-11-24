@@ -22,6 +22,8 @@ TODO (Phase 1): derive Q4 for flow metrics (FY - Q1 - Q2 - Q3) and free_cash_flo
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import replace
 from datetime import date
 from typing import Any
 
@@ -122,12 +124,26 @@ def merge_companyfacts(
     return {**current, "facts": facts}
 
 
-def extract_facts(companyfacts: dict[str, Any], ticker: str | None = None) -> list[dict]:
+def extract_facts(
+    companyfacts: dict[str, Any],
+    ticker: str | None = None,
+    overrides: Mapping[str, tuple[str, ...]] | None = None,
+) -> list[dict]:
+    """Normalized `facts` rows for one company.
+
+    overrides: optional {metric_key: tags} for this company (data/config/metric_overrides.csv).
+    The tags replace the metric's default priority list, and the component floor is switched
+    off: a person has already checked which tag is right for this company.
+    """
     cik = str(companyfacts.get("cik", "")).zfill(10)
     us_gaap = companyfacts.get("facts", {}).get("us-gaap", {})
     rows: list[dict] = []
+    overrides = overrides or {}
 
-    for metric in CORE_METRICS:
+    for default_metric in CORE_METRICS:
+        metric = default_metric
+        if metric.key in overrides:
+            metric = replace(metric, tags=tuple(overrides[metric.key]), component_tags=())
         # One {(period_type, end): [facts]} map per tag, in priority order. Keyed by end date
         # and length, not start date: filings sometimes disagree on the start by a day
         # (2009-01-01 vs 2008-12-31), which would otherwise split one period into two rows.
