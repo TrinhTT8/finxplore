@@ -23,6 +23,13 @@ class Metric:
     unit: str  # unit key inside companyfacts "units", e.g. "USD", "USD/shares", "shares"
     kind: Kind
     tags: tuple[str, ...]
+    # Tags that report only *part* of this metric. If a higher-priority tag's value for a
+    # period is under COMPONENT_FLOOR x the largest of these, that tag is treated as
+    # mis-tagged (a company using it for one revenue stream) and the next tag is tried.
+    component_tags: tuple[str, ...] = ()
+
+
+COMPONENT_FLOOR = 0.5
 
 
 CORE_METRICS: tuple[Metric, ...] = (
@@ -32,11 +39,15 @@ CORE_METRICS: tuple[Metric, ...] = (
         "USD",
         "flow",
         (
-            "RevenueFromContractWithCustomerExcludingAssessedTax",
             "Revenues",
+            "RevenueFromContractWithCustomerExcludingAssessedTax",
             "RevenueFromContractWithCustomerIncludingAssessedTax",
             "SalesRevenueNet",
         ),
+        # Not the tax-inclusive tag: gross-of-excise revenue can legitimately be 2x net
+        # revenue (tobacco, fuel), which would wrongly reject a correct Revenues total.
+        # SalesRevenueNet is the pre-2018 (pre-ASC 606) name for the same net-sales concept.
+        component_tags=("RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet"),
     ),
     Metric("gross_profit", "Gross profit", "USD", "flow", ("GrossProfit",)),
     Metric("operating_income", "Operating income", "USD", "flow", ("OperatingIncomeLoss",)),
