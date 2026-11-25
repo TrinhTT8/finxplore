@@ -27,6 +27,9 @@ class Metric:
     # period is under COMPONENT_FLOOR x the largest of these, that tag is treated as
     # mis-tagged (a company using it for one revenue stream) and the next tag is tried.
     component_tags: tuple[str, ...] = ()
+    # True when a real value can never be below zero. A derived (calculated) quarter that
+    # comes out negative is then a sign of mismatched inputs and is dropped.
+    non_negative: bool = False
 
 
 COMPONENT_FLOOR = 0.5
@@ -48,12 +51,18 @@ CORE_METRICS: tuple[Metric, ...] = (
         # revenue (tobacco, fuel), which would wrongly reject a correct Revenues total.
         # SalesRevenueNet is the pre-2018 (pre-ASC 606) name for the same net-sales concept.
         component_tags=("RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet"),
+        non_negative=True,
     ),
     Metric("gross_profit", "Gross profit", "USD", "flow", ("GrossProfit",)),
     Metric("operating_income", "Operating income", "USD", "flow", ("OperatingIncomeLoss",)),
     Metric("net_income", "Net income (profit)", "USD", "flow", ("NetIncomeLoss", "ProfitLoss")),
     Metric(
-        "rnd_expense", "Research & development", "USD", "flow", ("ResearchAndDevelopmentExpense",)
+        "rnd_expense",
+        "Research & development",
+        "USD",
+        "flow",
+        ("ResearchAndDevelopmentExpense",),
+        non_negative=True,
     ),
     Metric(
         "eps_diluted",
@@ -82,6 +91,7 @@ CORE_METRICS: tuple[Metric, ...] = (
         "USD",
         "flow",
         ("PaymentsToAcquirePropertyPlantAndEquipment",),
+        non_negative=True,
     ),
     Metric(
         "dividends_paid",
@@ -89,6 +99,7 @@ CORE_METRICS: tuple[Metric, ...] = (
         "USD",
         "flow",
         ("PaymentsOfDividends", "PaymentsOfDividendsCommonStock"),
+        non_negative=True,
     ),
     Metric("total_assets", "Total assets", "USD", "instant", ("Assets",)),
     Metric("total_liabilities", "Total liabilities", "USD", "instant", ("Liabilities",)),

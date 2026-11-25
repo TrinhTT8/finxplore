@@ -31,9 +31,13 @@ def test_tag_fallback_prefers_first_tag():
     assert [r["value"] for r in fy2023] == [400000000000]
 
 
-def test_skips_ytd_periods_and_keeps_quarters():
-    periods = {r["fiscal_period"] for r in _rows("revenue")}
-    assert periods == {"FY", "Q1"}  # the 6-month YTD fact is skipped
+def test_ytd_is_not_a_row_but_derives_the_missing_quarter():
+    rows = {r["fiscal_period"]: r for r in _rows("revenue") if r["fiscal_year"] == 2023}
+    assert set(rows) == {"FY", "Q1", "Q2"}  # no 6-month row; Q2 is calculated from it
+    q2 = rows["Q2"]
+    assert q2["value"] == 211990000000 - 117154000000  # 6-month YTD - Q1 = Apple's real Q2
+    assert (q2["form"], q2["accession_no"], q2["period_end"]) == ("derived", None, "2023-04-01")
+    assert rows["Q1"]["form"] == "10-Q"  # reported quarters are untouched
 
 
 def test_instant_metric():
@@ -292,3 +296,261 @@ def test_override_for_one_metric_leaves_others_alone():
     default = [r for r in extract_facts(doc, ticker="AAPL") if r["metric"] != "revenue"]
     overridden = extract_facts(doc, ticker="AAPL", overrides={"revenue": ("SalesRevenueNet",)})
     assert [r for r in overridden if r["metric"] != "revenue"] == default
+
+
+# ---------- Derived quarters and free cash flow ----------
+FY24 = ("2024-01-01", "2024-12-31")
+
+
+def _flow(start, end, val, filed, fp, form):
+    return _revenue_fact(start, end, val, filed, 2024, fp, form)
+
+
+def _cash_flow_year(q1: float, h1: float, nine: float, year: float) -> list[dict]:
+    """How 10-Qs report cash flow: Q1, then 6- and 9-month year-to-date, then the 10-K year."""
+    return [
+        _flow("2024-01-01", "2024-03-31", q1, "2024-05-01", "Q1", "10-Q"),
+        _flow("2024-01-01", "2024-06-30", h1, "2024-08-01", "Q2", "10-Q"),
+        _flow("2024-01-01", "2024-09-30", nine, "2024-11-01", "Q3", "10-Q"),
+        _flow(*FY24, year, "2025-02-15", "FY", "10-K"),
+    ]
+
+
+def _by_period(rows, metric):
+    return {r["fiscal_period"]: r for r in rows if r["metric"] == metric}
+
+
+def test_cash_flow_quarters_are_derived_from_year_to_date():
+    doc = _doc(
+        1,
+        NetCashProvidedByUsedInOperatingActivities=_cash_flow_year(10, 25, 45, 70),
+    )
+    ocf = _by_period(extract_facts(doc), "operating_cash_flow")
+    assert {k: r["value"] for k, r in ocf.items()} == {
+        "Q1": 10,
+        "Q2": 15,
+        "Q3": 20,
+        "Q4": 25,
+        "FY": 70,
+    }
+    assert [ocf[k]["form"] for k in ("Q1", "Q2", "Q3", "Q4", "FY")] == [
+        "10-Q",
+        "derived",
+        "derived",
+        "derived",
+        "10-K",
+    ]
+    assert [ocf[k]["period_end"] for k in ("Q2", "Q3", "Q4")] == [
+        "2024-06-30",
+        "2024-09-30",
+        "2024-12-31",
+    ]
+    assert {r["fiscal_year"] for r in ocf.values()} == {2024}
+    assert ocf["Q4"]["filed_date"] == "2025-02-15"  # latest filing used in the calculation
+
+
+def test_q4_falls_back_to_year_minus_reported_quarters():
+    # Income statements: 10-Qs report 3-month quarters, the 10-K only the full year.
+    doc = _doc(
+        2,
+        Revenues=[
+            _flow("2024-01-01", "2024-03-31", 100, "2024-05-01", "Q1", "10-Q"),
+            _flow("2024-04-01", "2024-06-30", 110, "2024-08-01", "Q2", "10-Q"),
+            _flow("2024-07-01", "2024-09-30", 120, "2024-11-01", "Q3", "10-Q"),
+            _flow(*FY24, 460, "2025-02-15", "FY", "10-K"),
+        ],
+    )
+    revenue = _by_period(extract_facts(doc), "revenue")
+    assert revenue["Q4"]["value"] == 460 - 100 - 110 - 120
+    assert revenue["Q4"]["form"] == "derived"
+
+
+def test_reported_q4_is_never_replaced():
+    doc = _doc(
+        3,
+        Revenues=[
+            _flow("2024-01-01", "2024-03-31", 100, "2024-05-01", "Q1", "10-Q"),
+            _flow("2024-04-01", "2024-06-30", 110, "2024-08-01", "Q2", "10-Q"),
+            _flow("2024-07-01", "2024-09-30", 120, "2024-11-01", "Q3", "10-Q"),
+            _flow("2024-10-01", "2024-12-31", 131, "2025-02-15", "FY", "10-K"),  # real Q4
+            _flow(*FY24, 460, "2025-02-15", "FY", "10-K"),
+        ],
+    )
+    q4 = [r for r in extract_facts(doc) if r["metric"] == "revenue" and r["fiscal_period"] == "Q4"]
+    assert [(r["value"], r["form"]) for r in q4] == [(131, "10-K")]
+
+
+def test_impossible_derived_quarters_are_dropped():
+    # A restated (smaller) year next to unrestated quarters gives a negative Q4: not stored.
+    negative = _doc(
+        4,
+        Revenues=[
+            _flow("2024-01-01", "2024-09-30", 300, "2024-11-01", "Q3", "10-Q"),
+            _flow(*FY24, 250, "2025-02-15", "FY", "10-K"),
+        ],
+    )
+    assert "Q4" not in _by_period(extract_facts(negative), "revenue")
+
+    # Signed metrics (net income) may have a loss quarter bigger than the yearly profit.
+    loss = _doc(
+        5,
+        NetIncomeLoss=[
+            _flow("2024-01-01", "2024-09-30", 300, "2024-11-01", "Q3", "10-Q"),
+            _flow(*FY24, 250, "2025-02-15", "FY", "10-K"),
+        ],
+    )
+    assert _by_period(extract_facts(loss), "net_income")["Q4"]["value"] == -50
+
+
+def test_ratio_metrics_are_not_derived():
+    doc = _doc(6)
+    doc["facts"]["us-gaap"]["EarningsPerShareDiluted"] = {
+        "units": {
+            "USD/shares": [
+                _flow("2024-01-01", "2024-09-30", 3.0, "2024-11-01", "Q3", "10-Q"),
+                _flow(*FY24, 4.1, "2025-02-15", "FY", "10-K"),
+            ]
+        }
+    }
+    eps = _by_period(extract_facts(doc), "eps_diluted")
+    assert set(eps) == {"FY"}  # per-share values can't be subtracted (share count changes)
+
+
+def test_free_cash_flow_for_every_period_with_both_inputs():
+    doc = _doc(
+        7,
+        NetCashProvidedByUsedInOperatingActivities=_cash_flow_year(10, 25, 45, 70),
+        PaymentsToAcquirePropertyPlantAndEquipment=_cash_flow_year(3, 7, 12, 20),
+    )
+    fcf = _by_period(extract_facts(doc), "free_cash_flow")
+    assert {k: r["value"] for k, r in fcf.items()} == {
+        "Q1": 10 - 3,
+        "Q2": 15 - 4,
+        "Q3": 20 - 5,
+        "Q4": 25 - 8,
+        "FY": 70 - 20,
+    }
+    assert {r["form"] for r in fcf.values()} == {"derived"}
+    assert {r["unit"] for r in fcf.values()} == {"USD"}
+
+
+def test_quarter_from_10k_quarterly_table_is_labelled_by_its_dates():
+    # Regression: Apple's 10-K quarterly table (fp=FY, fy=2017) re-reported the quarter
+    # ending 2016-12-31 under a tag its 10-Q didn't use, so it was labelled "Q4 FY2017".
+    # By dates it is Q1 of the fiscal year 2016-09-25..2017-09-30.
+    doc = _doc(
+        320193,
+        Revenues=[
+            _revenue_fact("2016-09-25", "2016-12-31", 78.4e9, "2017-11-03", 2017, "FY"),
+            _revenue_fact("2016-09-25", "2017-09-30", 229.2e9, "2017-11-03", 2017, "FY"),
+        ],
+    )
+    q = [r for r in _revenue(doc) if r["period_end"] == "2016-12-31"]
+    assert [(r["fiscal_year"], r["fiscal_period"]) for r in q] == [(2017, "Q1")]
+
+
+def test_overlapping_fiscal_years_do_not_duplicate_derived_quarters():
+    # Regression (Ciena): two annual periods a few days apart for the same year used to
+    # derive the same quarter twice.
+    doc = _doc(
+        936395,
+        NetCashProvidedByUsedInOperatingActivities=[
+            *_cash_flow_year(10, 25, 45, 70),
+            _flow("2024-01-01", "2024-12-28", 70, "2025-03-01", "FY", "10-K"),
+        ],
+    )
+    q2 = [
+        r
+        for r in extract_facts(doc)
+        if r["metric"] == "operating_cash_flow" and r["fiscal_period"] == "Q2"
+    ]
+    assert len(q2) == 1
+
+
+# ---------- Fiscal year naming convention ----------
+def _annual(start, end, val, filed, fy):
+    return _revenue_fact(start, end, val, filed, fy, "FY")
+
+
+def test_wrong_fy_in_one_filing_does_not_duplicate_a_year():
+    # Regression (Arch Capital): the 10-K for 2021 carried fy=2020, so two different years
+    # were both labelled "FY 2020". The company's convention (offset 0) is applied instead.
+    doc = _doc(
+        947484,
+        Revenues=[
+            _annual("2019-01-01", "2019-12-31", 7.0e9, "2020-02-28", 2019),
+            _annual("2020-01-01", "2020-12-31", 8.5e9, "2021-02-26", 2020),
+            _annual("2021-01-01", "2021-12-31", 9.2e9, "2022-02-25", 2020),  # bad fy
+            _annual("2022-01-01", "2022-12-31", 10.1e9, "2023-02-24", 2022),
+        ],
+    )
+    years = {r["period_end"]: r["fiscal_year"] for r in _revenue(doc)}
+    assert years == {"2019-12-31": 2019, "2020-12-31": 2020, "2021-12-31": 2021, "2022-12-31": 2022}
+
+
+def test_53_week_year_ending_in_early_january_keeps_its_name():
+    # Snap-on style: fiscal 2025 ended 2026-01-03, fiscal 2024 ended 2024-12-28.
+    doc = _doc(
+        91440,
+        Revenues=[
+            _annual("2023-12-31", "2024-12-28", 4.7e9, "2025-02-13", 2024),
+            _annual("2024-12-29", "2026-01-03", 4.8e9, "2026-02-12", 2025),
+        ],
+    )
+    years = {r["period_end"]: r["fiscal_year"] for r in _revenue(doc)}
+    assert years == {"2024-12-28": 2024, "2026-01-03": 2025}
+
+
+def test_company_naming_year_before_its_end_date_is_respected():
+    # Target style: the year ending 2026-01-31 is "fiscal 2025" (offset -1); its quarters
+    # follow the annual period's year.
+    doc = _doc(
+        27419,
+        Revenues=[
+            _annual("2024-02-04", "2025-02-01", 106.6e9, "2025-03-12", 2024),
+            _annual("2025-02-02", "2026-01-31", 104.0e9, "2026-03-11", 2025),
+            _revenue_fact("2025-02-02", "2025-05-03", 23.8e9, "2025-05-28", 2025, "Q1", "10-Q"),
+        ],
+    )
+    labels = {r["period_end"]: (r["fiscal_year"], r["fiscal_period"]) for r in _revenue(doc)}
+    assert labels["2026-01-31"] == (2025, "FY")
+    assert labels["2025-02-01"] == (2024, "FY")
+    assert labels["2025-05-03"] == (2025, "Q1")
+
+
+def test_balance_sheet_dates_are_labelled_on_the_company_calendar():
+    # Regression (Agilent, fiscal year ends Oct 31): the 10-K's prior-year balance and the
+    # 10-Q's Q1 balance were both labelled "Q1 2019". By the calendar, 2018-10-31 is the end
+    # of FY2018 and 2019-01-31 is Q1 of FY2019.
+    doc = _doc(
+        1090872,
+        Revenues=[
+            _annual("2017-11-01", "2018-10-31", 4.9e9, "2018-12-20", 2018),
+            _annual("2018-11-01", "2019-10-31", 5.2e9, "2019-12-19", 2019),
+        ],
+        CashAndCashEquivalentsAtCarryingValue=[
+            {"end": "2018-10-31", "val": 2.2e9, "accn": "a", "fy": 2019, "fp": "Q1",
+             "form": "10-Q", "filed": "2019-03-01"},
+            {"end": "2019-01-31", "val": 2.0e9, "accn": "b", "fy": 2019, "fp": "Q1",
+             "form": "10-Q", "filed": "2019-03-01"},
+        ],
+    )  # fmt: skip
+    cash = {r["period_end"]: (r["fiscal_year"], r["fiscal_period"])
+            for r in extract_facts(doc) if r["metric"] == "cash"}  # fmt: skip
+    assert cash == {"2018-10-31": (2018, "FY"), "2019-01-31": (2019, "Q1")}
+
+
+def test_trailing_twelve_months_in_a_10q_is_not_a_fiscal_year():
+    # Regression (Amazon): 10-Qs include 12-month figures ending at the quarter. They are
+    # 365 days long but are not fiscal years, and one replaced Amazon's real FY2025.
+    doc = _doc(
+        1018724,
+        NetIncomeLoss=[
+            _annual("2024-04-01", "2025-03-31", 65.9e9, "2025-05-02", 2025) | {"form": "10-Q"},
+            _annual("2025-01-01", "2025-12-31", 77.7e9, "2026-02-06", 2025),
+        ],
+    )
+    fy = [
+        r for r in extract_facts(doc) if r["metric"] == "net_income" and r["fiscal_period"] == "FY"
+    ]
+    assert [(r["period_end"], r["value"]) for r in fy] == [("2025-12-31", 77.7e9)]
